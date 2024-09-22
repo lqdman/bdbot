@@ -1,0 +1,8 @@
+version: '1'
+services:
+  bot:
+    build: .
+    ports:
+      - "80:80"
+    volumes:
+      - /data:/data
