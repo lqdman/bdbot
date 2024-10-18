@@ -1,15 +1,12 @@
 {
   "chatId": 267634232,
-  "language": "English",
+  "language": "Russian",
   "blocked": false,
   "postData": {
-    "battleLink": "https://on.soundcloud.com/KjhMEaCYoxcwgnc67",
-    "battleName": "jsdfk",
-    "battleDates": "18 #August2025",
-    "battleMonth": "August",
-    "battleYear": "2025",
-    "battleLocation": "ka, Kenya",
-    "battleDescription": "Нет описания"
+    "practiceName": "inaction",
+    "practiceLocation": "казань, Russia",
+    "practiceDescription": "ямашева 36",
+    "practiceLink": "https://vk.com/ymeuverteca"
   },
   "state": "completed",
   "approved": true

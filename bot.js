@@ -2,6 +2,8 @@ const TelegramBot = require("node-telegram-bot-api");
 const fs = require("fs");
 const axios = require("axios");
 require("dotenv").config(); // Загружаем переменные окружения из файла .env
+const cron = require("node-cron");
+const { saveEventsData, sendEventPost } = require("./eventScraper"); // Импортируем функции из eventScraper.js
 
 // Получаем токен бота из переменных окружения
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -22,17 +24,30 @@ const bot = new TelegramBot(token, { polling: true });
 
 // 1. Функция для чтения данных из файла
 const readUserData = (chatId) => {
+  const filePath = `users/${chatId}.json`;
+  console.log(`Reading user data from file: ${filePath}`); // Логирование пути к файлу
+  if (!fs.existsSync(filePath)) {
+    console.log(`File ${filePath} does not exist.`); // Логирование, если файл не существует
+    return null;
+  }
   try {
-    const data = fs.readFileSync(`users/${chatId}.json`, "utf8");
+    const data = fs.readFileSync(filePath, "utf8");
     return JSON.parse(data);
   } catch (error) {
+    console.error(`Error reading user data for chatId ${chatId}:`, error);
     return null;
   }
 };
 
-// 2. Функция для записи данных в файл
+// Функция для записи данных пользователя
 const writeUserData = (chatId, data) => {
-  fs.writeFileSync(`users/${chatId}.json`, JSON.stringify(data, null, 2));
+  const filePath = `users/${chatId}.json`;
+  console.log(`Writing user data to file: ${filePath}`); // Логирование пути к файлу
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error(`Error writing user data for chatId ${chatId}:`, error);
+  }
 };
 
 // 3. Функция для обновления состояния пользователя
@@ -147,7 +162,6 @@ const {
   scheduleEventsForThisWeek,
 } = require("./dataSaver");
 
-// Настройка автоматической отправки списка событий каждый понедельник в 10:08
 scheduleEventsForThisWeek(bot, channelId);
 
 // Обработчики команд
@@ -272,7 +286,7 @@ const messages = {
     addBattleLink: "Add a link to the Battle page (VK, Inst, FB):",
     invalidLink: "Without a link, we can't continue.",
     postReady:
-      "Great, the post is ready to be published\n— Choose what you want to do?",
+      "Great, the post is ready to be published\n—  It remains to publish it",
     postPublished: "Post published to channel!",
     invalidPracticeName:
       "The practice name can only contain letters. Please enter a valid name.",
@@ -357,8 +371,7 @@ const messages = {
       "❗️ Пожалуйста, отправьте текстовое описание. Другие типы сообщений не допускаются.\n\n",
     addBattleLink: "Добавьте ссылку на страницу Батла (VK, Inst, FB):",
     invalidLink: "Без ссылки не получится продолжить.",
-    postReady:
-      "Отлично, пост готов к публикации\n— Выбери, что ты хочешь сделать?",
+    postReady: "Отлично, пост готов к публикации\n— Осталось его опубликовать",
     postPublished: "Пост опубликован на канале!",
     invalidPracticeName:
       "Название тренировки может содержать только буквы. Пожалуйста, введите корректное название.",
@@ -743,8 +756,8 @@ async function handleAwaitingEventLink(msg, chatId, userData) {
     // Отправляем итоговое сообщение
     await sendFinalMessage(chatId, updatedUserData);
 
-    // Отправляем сообщение о готовности поста к публикации
-    await sendPostReadyMessage(chatId, userData.language);
+    // // Отправляем сообщение о готовности поста к публикации
+    // await sendPostReadyMessage(chatId, userData.language);
 
     // Обновляем состояние пользователя на "completed"
     updateUserState(chatId, "completed");
@@ -877,8 +890,8 @@ function handleAwaitingBattleLink(msg, chatId, userData) {
   // Прочитать данные пользователя снова после обновления состояния
   const updatedUserData = readUserData(chatId);
 
-  // Отправляем сводку постов пользователю
-  sendFinalMessage(chatId, updatedUserData);
+  // // Отправляем сводку постов пользователю
+  // sendFinalMessage(chatId, updatedUserData);
 }
 
 // ДЛЯ ТРЕНИРОВОК /////////////////////////////////////////////////////
@@ -1141,9 +1154,16 @@ function sendPostReadyMessage(chatId, language) {
       [{ text: messages[language].publishButton, callback_data: "publish" }],
     ],
   };
-  return bot.sendMessage(chatId, messages[language].postReady, {
-    reply_markup: keyboard,
-  });
+  bot
+    .sendMessage(chatId, messages[language].postReady, {
+      reply_markup: keyboard,
+    })
+    .then((sentMessage) => {
+      postReadyMessageId = sentMessage.message_id; // Сохраняем идентификатор сообщения о готовности поста к публикации
+    })
+    .catch((error) => {
+      console.error("Error sending post ready message:", error);
+    });
 }
 
 function sendFinalMessage(chatId, userData) {
@@ -1514,6 +1534,10 @@ function handleCompletedCallback(
       publishToChannel(chatId, userData)
         .then(() => {
           bot.sendMessage(chatId, messages[userData.language].postPublished); // Отправляем сообщение в чат с учетом выбранного языка
+          // После успешной публикации, отправляем сообщение с кнопками "Добавить баттл" и "Добавить тренировку"
+          bot.sendMessage(chatId, messages[userData.language].newPost, {
+            reply_markup: createAddButtonsKeyboard(userData.language),
+          });
         })
         .catch((error) => {
           console.error("Error publishing post:", error);
@@ -1533,7 +1557,7 @@ function handleCompletedCallback(
   }
 }
 
-// 52. Функция для обработки состояния 'awaitingAdminApproval'
+// Функция для обработки состояния 'awaitingAdminApproval'
 function handleAwaitingAdminApprovalCallback(
   query,
   chatId,
@@ -1541,27 +1565,43 @@ function handleAwaitingAdminApprovalCallback(
   selectedValue,
   userData
 ) {
+  console.log(`Callback query data: ${selectedValue}`); // Логирование данных из callback_query
+
   const userId = selectedValue.split("_")[1];
   const action = selectedValue.split("_")[0];
 
+  console.log(`Processing admin action: ${action} for userId: ${userId}`); // Логирование действия и userId
+
   if (action === "approve") {
-    let userData = readUserData(userId);
-    userData.approved = true;
-    writeUserData(userId, userData);
-    bot.sendMessage(userId, messages[userData.language].postApproved);
-    publishToChannel(userId, userData)
-      .then(() => {
-        bot.sendMessage(userId, messages[userData.language].postPublished); // Отправляем сообщение в чат с учетом выбранного языка
-        // Сбрасываем состояние пользователя после одобрения поста
-        updateUserState(userId, null);
-      })
-      .catch((error) => {
-        console.error("Error publishing post:", error);
-        bot.sendMessage(
-          userId,
-          "Failed to publish post. Please check logs for details."
-        );
-      });
+    console.log(`Reading user data for userId: ${userId}`); // Дополнительное логирование перед чтением данных
+    const userData = readUserData(userId); // Используем userId для чтения данных пользователя
+    if (!userData) {
+      console.log(`User data for userId ${userId} not found.`); // Логирование, если данные не найдены
+      bot.sendMessage(
+        ADMIN_CHAT_ID,
+        `User data for userId ${userId} not found.`
+      );
+      bot.deleteMessage(ADMIN_CHAT_ID, messageId);
+      return;
+    } else {
+      userData.approved = true;
+      console.log(`Writing user data for userId: ${userId}`); // Дополнительное логирование перед записью данных
+      writeUserData(userId, userData); // Используем userId для записи данных пользователя
+      bot.sendMessage(userId, messages[userData.language].postApproved);
+      publishToChannel(userId, userData)
+        .then(() => {
+          bot.sendMessage(userId, messages[userData.language].postPublished); // Отправляем сообщение в чат с учетом выбранного языка
+          // Сбрасываем состояние пользователя после одобрения поста
+          updateUserState(userId, null);
+        })
+        .catch((error) => {
+          console.error("Error publishing post:", error);
+          bot.sendMessage(
+            userId,
+            "Failed to publish post. Please check logs for details."
+          );
+        });
+    }
   } else if (action === "reject") {
     bot.sendMessage(userId, messages[userData.language].postRejected);
   }
@@ -1680,64 +1720,94 @@ async function publishToChannel(chatId, userData) {
 
   if (isBattle) {
     await publishPost(chatId, userData, true);
+
+    // Логирование для отладки
+    const {
+      battleName,
+      battleDates,
+      battleMonth,
+      battleYear,
+      battleLocation,
+      battleLink,
+    } = userData.postData;
+    console.log("Battle Month:", battleMonth); // Проверка значения battleMonth
+    console.log("User Language:", userData.language); // Проверка языка пользователя
+
+    // Проверка, если язык существует в months
+    if (!battleMonth || !months[userData.language]) {
+      console.error("Invalid battleMonth or unsupported language");
+      throw new Error("Invalid battleMonth or unsupported language");
+    }
+
+    const day = battleDates.split(" ")[0];
+    const monthIndex = months[userData.language].indexOf(battleMonth) + 1; // Использование правильного массива месяцев
+
+    if (monthIndex === 0) {
+      console.error("Month not found in the array");
+      throw new Error("Month not found in the array");
+    }
+
+    const locationParts = battleLocation.split(",");
+    const city = locationParts[0];
+    const country = locationParts[1] ? locationParts[1].trim() : "";
+
+    const eventData = {
+      day,
+      month: monthIndex, // Преобразованный индекс месяца
+      year: battleYear.slice(-2),
+      city,
+      country,
+      eventName: battleName,
+      link: battleLink,
+    };
+
+    saveEventData(eventData, userData.language); // Передаем язык пользователя
   } else if (isPractice) {
     await publishPost(chatId, userData, false);
+
+    // Логирование для отладки
+    const { practiceName, practiceLocation, practiceLink } = userData.postData;
+    console.log("Practice Name:", practiceName); // Проверка значения practiceName
+    console.log("User Language:", userData.language); // Проверка языка пользователя
+
+    // Тренировки не записываются в файл eventsdata.txt
+    console.log("Practice data not saved to eventsdata.txt");
   } else {
     console.error("Unknown post type");
     throw new Error("Unknown post type");
   }
-
-  // Логирование для отладки
-  const {
-    battleName,
-    battleDates,
-    battleMonth,
-    battleYear,
-    battleLocation,
-    battleLink,
-  } = userData.postData;
-  console.log("Battle Month:", battleMonth); // Проверка значения battleMonth
-  console.log("User Language:", userData.language); // Проверка языка пользователя
-
-  // Проверка, если язык существует в months
-  if (!battleMonth || !months[userData.language]) {
-    console.error("Invalid battleMonth or unsupported language");
-    throw new Error("Invalid battleMonth or unsupported language");
-  }
-
-  const day = battleDates.split(" ")[0];
-  const monthIndex = months[userData.language].indexOf(battleMonth) + 1; // Использование правильного массива месяцев
-
-  if (monthIndex === 0) {
-    console.error("Month not found in the array");
-    throw new Error("Month not found in the array");
-  }
-
-  const locationParts = battleLocation.split(",");
-  const city = locationParts[0];
-  const country = locationParts[1] ? locationParts[1].trim() : "";
-
-  const eventData = {
-    day,
-    month: monthIndex, // Преобразованный индекс месяца
-    year: battleYear.slice(-2),
-    city,
-    country,
-    eventName: battleName,
-    link: battleLink,
-  };
-
-  saveEventData(eventData, userData.language); // Передаем язык пользователя
 }
 
 // 57. Основной обработчик callback-запросов
+
+// const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID; // Убедитесь, что у вас есть этот ID в .env
+
+// Основной обработчик callback-запросов
 bot.on("callback_query", (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   const selectedValue = query.data;
-  let userData = readUserData(chatId);
+
+  console.log(
+    `Callback query received: chatId=${chatId}, messageId=${messageId}, selectedValue=${selectedValue}`
+  );
+
+  let userId;
+  if (
+    selectedValue.startsWith("approve_") ||
+    selectedValue.startsWith("reject_")
+  ) {
+    userId = selectedValue.split("_")[1];
+  } else {
+    userId = chatId;
+  }
+
+  console.log(`Reading user data for userId=${userId}`);
+  let userData = readUserData(userId);
+  console.log(`User data read:`, userData);
 
   if (!userData || !userData.state) {
+    console.log(`User data not found or state is not set for userId=${userId}`);
     return;
   }
 
@@ -1758,7 +1828,110 @@ bot.on("callback_query", (query) => {
       : userData.state;
   const handler = callbackHandlers[handlerKey];
   if (handler) {
+    console.log(`Processing callback for state=${handlerKey}`);
     handler(query, chatId, messageId, selectedValue, userData);
+  } else {
+    console.log(`No handler found for state=${handlerKey}`);
   }
   bot.answerCallbackQuery(query.id);
 });
+////////////////////////////////////
+
+// Обработчик команды /makeapost
+bot.onText(/\/makeapost/, async (msg) => {
+  console.log("Запуск команды /makeapost");
+  const filePath = "events_data.json";
+
+  try {
+    // Проверяем, существует ли файл с данными
+    if (fs.existsSync(filePath)) {
+      const events = JSON.parse(fs.readFileSync(filePath, "utf8"));
+
+      // Ищем первое не опубликованное мероприятие
+      for (const event of events) {
+        const isPublished = await isEventPublished(event);
+        if (!isPublished) {
+          await sendEventPost(bot, event);
+          bot.sendMessage(
+            msg.chat.id,
+            `Мероприятие "${event.name}" успешно отправлено на канал.`
+          );
+          saveEventData(event); // Сохраняем данные опубликованного поста
+          break; // Прерываем цикл после публикации первого не опубликованного поста
+        }
+      }
+    } else {
+      bot.sendMessage(msg.chat.id, "Файл с данными о мероприятиях не найден.");
+    }
+  } catch (error) {
+    console.error("Ошибка при чтении данных:", error);
+    bot.sendMessage(
+      msg.chat.id,
+      "Произошла ошибка при чтении данных о мероприятиях."
+    );
+  }
+});
+
+// Функция для проверки, было ли мероприятие уже опубликовано
+async function isEventPublished(event) {
+  const publishedEventsFilePath = "eventsData.txt";
+
+  // Проверяем, существует ли файл с опубликованными постами
+  if (!fs.existsSync(publishedEventsFilePath)) {
+    return false;
+  }
+
+  // Читаем данные из файла с опубликованными постами
+  const publishedEvents = fs
+    .readFileSync(publishedEventsFilePath, "utf8")
+    .split("\n");
+
+  // Проверяем, был ли этот пост уже опубликован
+  return publishedEvents.some((publishedEvent) => {
+    const eventParts = publishedEvent.split(" / ");
+    return eventParts[2] === event.name;
+  });
+}
+
+// Настройка планировщика задач для команды /makeapost
+cron.schedule("6 10 * * *", async () => {
+  console.log("Запуск задачи по выполнению команды /makeapost");
+  const filePath = "events_data.json";
+
+  try {
+    // Проверяем, существует ли файл с данными
+    if (fs.existsSync(filePath)) {
+      const events = JSON.parse(fs.readFileSync(filePath, "utf8"));
+
+      // Ищем первое не опубликованное мероприятие
+      for (const event of events) {
+        const isPublished = await isEventPublished(event);
+        if (!isPublished) {
+          await sendEventPost(bot, event);
+          console.log(
+            `Мероприятие "${event.name}" успешно отправлено на канал.`
+          );
+          saveEventData(event); // Сохраняем данные опубликованного поста
+          break; // Прерываем цикл после публикации первого не опубликованного поста
+        }
+      }
+    } else {
+      console.log("Файл с данными о мероприятиях не найден.");
+    }
+  } catch (error) {
+    console.error("Ошибка при чтении данных:", error);
+  }
+});
+
+// Настройка планировщика задач для извлечения и сохранения данных о мероприятиях
+cron.schedule("0 0 * * *", async () => {
+  console.log("Запуск задачи по извлечению и сохранению данных о мероприятиях");
+  const url = "https://example.com/events"; // Замените на реальный URL
+  const filePath = "events_data.json";
+  await saveEventsData(url, filePath);
+});
+
+// Пример использования
+const url = "https://www.bboybattles.org/battles.aspx"; // Замените на реальный URL
+const filePath = "events_data.json";
+saveEventsData(url, filePath);
